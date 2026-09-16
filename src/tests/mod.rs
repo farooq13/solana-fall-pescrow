@@ -326,9 +326,7 @@ mod tests {
             do_make(&mut svm, &maker, amount_to_receive, amount_to_give, mint_supply);
 
         let program_id = program_id();
-        let associated_token_program = ASSOCIATED_TOKEN_PROGRAM_ID.parse::<Pubkey>().unwrap();
         let token_program = TOKEN_PROGRAM_ID;
-        let system_program = solana_sdk_ids::system_program::ID;
 
         let maker_ata_a = spl_associated_token_account::get_associated_token_address(
             &maker.pubkey(), &mint_a,
@@ -343,9 +341,7 @@ mod tests {
                 AccountMeta::new(escrow_pda, false),       // 2 escrow
                 AccountMeta::new(vault, false),            // 3 vault
                 AccountMeta::new(maker_ata_a, false),      // 4 maker_ata_a
-                AccountMeta::new_readonly(system_program, false),
-                AccountMeta::new_readonly(token_program, false),
-                AccountMeta::new_readonly(associated_token_program, false),
+                AccountMeta::new_readonly(token_program, false), // 5 token_program
             ],
             data: vec![2u8],
         };
@@ -377,9 +373,7 @@ mod tests {
             do_make(&mut svm, &maker, 100_000_000, 500_000_000, 1_000_000_000);
 
         let program_id = program_id();
-        let associated_token_program = ASSOCIATED_TOKEN_PROGRAM_ID.parse::<Pubkey>().unwrap();
         let token_program = TOKEN_PROGRAM_ID;
-        let system_program = solana_sdk_ids::system_program::ID;
 
         // The imposter tries to cancel using their own key as maker — but the escrow
         // records the real maker, so the cross-check must fail.
@@ -395,9 +389,7 @@ mod tests {
                 AccountMeta::new(escrow_pda, false),
                 AccountMeta::new(vault, false),
                 AccountMeta::new(imposter_ata_a, false),
-                AccountMeta::new_readonly(system_program, false),
                 AccountMeta::new_readonly(token_program, false),
-                AccountMeta::new_readonly(associated_token_program, false),
             ],
             data: vec![2u8],
         };

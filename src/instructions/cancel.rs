@@ -1,14 +1,12 @@
 // Cancel instruction — account order:
 //
 // #  Account                  W  S  Notes
-// 0  maker                    ✓  ✓  Must be the escrow's maker; receives tokens and rent back
+// 0  maker                    ✓  ✓  Must sign. Must equal escrow.maker()
 // 1  mint_a                          Must equal escrow.mint_a()
-// 2  escrow_account           ✓     PDA ["escrow", maker], owned by this program, will be closed
-// 3  vault                    ✓     ATA(escrow PDA, mint_a), will be closed
-// 4  maker_ata_a              ✓     ATA(maker, mint_a), destination for returned A
-// 5  system_program
-// 6  token_program
-// 7  associated_token_program
+// 2  escrow_account           ✓     PDA, will be closed
+// 3  vault                    ✓     Will be closed
+// 4  maker_ata_a              ✓     Destination for the returned A
+// 5  token_program
 
 use pinocchio::{AccountView, ProgramResult, cpi::{Seed, Signer}, error::ProgramError};
 
@@ -25,9 +23,7 @@ pub fn process_cancel_instruction(
         escrow_account,
         vault,
         maker_ata_a,
-        system_program,
-        token_program,
-        _associated_token_program @ ..
+        _token_program @ ..
     ] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -64,7 +60,7 @@ pub fn process_cancel_instruction(
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // 5 · Validate the vault
+    // 5 · Validate the vault: owner = escrow PDA, mint = mint A
     let vault_amount = {
         let vault_state = pinocchio_token::state::Account::from_account_view(vault)?;
         if vault_state.owner() != escrow_account.address() {
@@ -76,17 +72,18 @@ pub fn process_cancel_instruction(
         vault_state.amount()
     };
 
-    // 6 · Ensure maker's ATA for A exists (idempotent — it should already exist, but be safe)
-    pinocchio_associated_token_account::instructions::CreateIdempotent {
-        funding_account: maker,
-        account: maker_ata_a,
-        wallet: maker,
-        mint: mint_a,
-        token_program,
-        system_program,
-    }.invoke()?;
+    // Validate maker_ata_a: owner = maker, mint = mint A
+    {
+        let maker_ata_state = pinocchio_token::state::Account::from_account_view(maker_ata_a)?;
+        if maker_ata_state.owner() != maker.address() {
+            return Err(ProgramError::IllegalOwner);
+        }
+        if maker_ata_state.mint() != mint_a.address() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+    }
 
-    // 7 · Build PDA signer
+    // 6 · Build PDA signer
     let bump_bytes = [bump];
     let seed = [
         Seed::from(b"escrow"),
@@ -95,7 +92,7 @@ pub fn process_cancel_instruction(
     ];
     let signer = Signer::from(&seed);
 
-    // 8 · CPI #1: transfer all A from vault back to maker
+    // 7 · CPI #1: transfer all A from vault back to maker
     pinocchio_token::instructions::Transfer {
         from: vault,
         to: maker_ata_a,
@@ -104,7 +101,7 @@ pub fn process_cancel_instruction(
         amount: vault_amount,
     }.invoke_signed(&[signer.clone()])?;
 
-    // 9 · CPI #2: close the vault, refund rent to maker
+    // 8 · CPI #2: close the vault, refund rent to maker
     pinocchio_token::instructions::CloseAccount {
         account: vault,
         destination: maker,
@@ -112,7 +109,7 @@ pub fn process_cancel_instruction(
         multisig_signers: &[] as &[&AccountView],
     }.invoke_signed(&[signer.clone()])?;
 
-    // 10 · Close the escrow account (owned by our program, no CPI needed)
+    // 9 · Close the escrow account (owned by our program, no CPI needed)
     let escrow_lamports = escrow_account.lamports();
     maker.set_lamports(maker.lamports() + escrow_lamports);
     escrow_account.set_lamports(0);
