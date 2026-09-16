@@ -246,6 +246,9 @@ mod tests {
         let (mint_a, mint_b, escrow_pda, vault, _bump) =
             do_make(&mut svm, &maker, amount_to_receive, amount_to_give, mint_supply);
 
+        // Snapshot maker SOL before Take so we can verify rent refund
+        let maker_sol_before = svm.get_account(&maker.pubkey()).unwrap().lamports;
+
         // Give the taker some of mint_b so they can pay
         let taker_ata_b = CreateAssociatedTokenAccount::new(&mut svm, &taker, &mint_b)
             .owner(&taker.pubkey()).send().unwrap();
@@ -257,7 +260,8 @@ mod tests {
         let token_program = TOKEN_PROGRAM_ID;
         let system_program = solana_sdk_ids::system_program::ID;
 
-        // Derive taker's ATA for A and maker's ATA for B
+        // Derive taker's ATA for A and maker's ATA for B — do NOT create them,
+        // the program does that with CreateIdempotent.
         let taker_ata_a = spl_associated_token_account::get_associated_token_address(
             &taker.pubkey(), &mint_a,
         );
@@ -312,6 +316,12 @@ mod tests {
         // Verify: vault and escrow accounts are closed
         assert!(svm.get_account(&vault).is_none(), "vault should be closed");
         assert!(svm.get_account(&escrow_pda).is_none(), "escrow should be closed");
+
+        // Verify: maker SOL went up by roughly the rent of both closed accounts
+        let maker_sol_after = svm.get_account(&maker.pubkey()).unwrap().lamports;
+        let sol_gained = maker_sol_after.saturating_sub(maker_sol_before);
+        println!("Maker SOL gained from rent refunds: {} lamports", sol_gained);
+        assert!(sol_gained > 0, "maker should have received rent refunds");
     }
 
     #[test]
@@ -399,6 +409,12 @@ mod tests {
         let result = svm.send_transaction(tx);
         assert!(result.is_err(), "Cancel by non-maker should fail");
         println!("\nCancel by non-maker correctly rejected");
+
+        // Prove nothing moved: vault still holds 500 A
+        let vault_acc = svm.get_account(&vault).unwrap();
+        let vault_state = spl_token_2022::state::Account::unpack(&vault_acc.data).unwrap();
+        assert_eq!(vault_state.amount, 500_000_000, "vault must still hold 500 A");
+        println!("Vault still holds {} A — funds are safe", vault_state.amount);
     }
 
     #[test]
@@ -452,5 +468,75 @@ mod tests {
         let result = svm.send_transaction(tx);
         assert!(result.is_err(), "Take with insufficient B should fail");
         println!("\nTake with insufficient balance correctly rejected");
+
+        // Prove nothing moved: vault still holds 500 A
+        let vault_acc = svm.get_account(&vault).unwrap();
+        let vault_state = spl_token_2022::state::Account::unpack(&vault_acc.data).unwrap();
+        assert_eq!(vault_state.amount, 500_000_000, "vault must still hold 500 A");
+        println!("Vault still holds {} A — funds are safe", vault_state.amount);
+    }
+
+    #[test]
+    pub fn test_take_mismatched_maker() {
+        let (mut svm, maker) = setup();
+        let taker = Keypair::new();
+        let fake_maker = Keypair::new();
+        svm.airdrop(&taker.pubkey(), 10 * LAMPORTS_PER_SOL).expect("Airdrop failed");
+        svm.airdrop(&fake_maker.pubkey(), 10 * LAMPORTS_PER_SOL).expect("Airdrop failed");
+
+        let amount_to_receive: u64 = 100_000_000;
+        let amount_to_give: u64 = 500_000_000;
+
+        let (mint_a, mint_b, escrow_pda, vault, _bump) =
+            do_make(&mut svm, &maker, amount_to_receive, amount_to_give, 1_000_000_000);
+
+        // Give the taker enough B to pay
+        let taker_ata_b = CreateAssociatedTokenAccount::new(&mut svm, &taker, &mint_b)
+            .owner(&taker.pubkey()).send().unwrap();
+        MintTo::new(&mut svm, &maker, &mint_b, &taker_ata_b, 200_000_000).send().unwrap();
+
+        let program_id = program_id();
+        let associated_token_program = ASSOCIATED_TOKEN_PROGRAM_ID.parse::<Pubkey>().unwrap();
+        let token_program = TOKEN_PROGRAM_ID;
+        let system_program = solana_sdk_ids::system_program::ID;
+
+        let taker_ata_a = spl_associated_token_account::get_associated_token_address(
+            &taker.pubkey(), &mint_a,
+        );
+        // Pass fake_maker instead of the real maker — the cross-check must catch this
+        let fake_maker_ata_b = spl_associated_token_account::get_associated_token_address(
+            &fake_maker.pubkey(), &mint_b,
+        );
+
+        let take_ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(taker.pubkey(), true),        // 0 taker
+                AccountMeta::new(fake_maker.pubkey(), false),  // 1 WRONG maker
+                AccountMeta::new_readonly(mint_a, false),
+                AccountMeta::new_readonly(mint_b, false),
+                AccountMeta::new(escrow_pda, false),
+                AccountMeta::new(vault, false),
+                AccountMeta::new(taker_ata_a, false),
+                AccountMeta::new(taker_ata_b, false),
+                AccountMeta::new(fake_maker_ata_b, false),
+                AccountMeta::new_readonly(system_program, false),
+                AccountMeta::new_readonly(token_program, false),
+                AccountMeta::new_readonly(associated_token_program, false),
+            ],
+            data: vec![1u8],
+        };
+
+        let msg = Message::new(&[take_ix], Some(&taker.pubkey()));
+        let tx = Transaction::new(&[&taker], msg, svm.latest_blockhash());
+        let result = svm.send_transaction(tx);
+        assert!(result.is_err(), "Take with mismatched maker must fail");
+        println!("\nTake with mismatched maker correctly rejected");
+
+        // Prove nothing moved: vault still holds 500 A
+        let vault_acc = svm.get_account(&vault).unwrap();
+        let vault_state = spl_token_2022::state::Account::unpack(&vault_acc.data).unwrap();
+        assert_eq!(vault_state.amount, amount_to_give, "vault must still hold 500 A");
+        println!("Vault still holds {} A — funds are safe", vault_state.amount);
     }
 }
